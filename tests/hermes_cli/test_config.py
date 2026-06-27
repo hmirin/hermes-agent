@@ -1345,3 +1345,69 @@ class TestVerifyOnStopMigration:
             migrate_config(interactive=False, quiet=True)
             raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
             assert raw["agent"]["verify_on_stop"] is True
+
+
+class TestCodexNativeCompactionMigration:
+    """v31 -> v32: add the Codex-native compaction opt-in gate."""
+
+    def _write(self, tmp_path, body):
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+
+    def test_default_config_keeps_codex_native_compaction_opt_in(self):
+        assert DEFAULT_CONFIG["compression"]["codex_native_compaction"] is False
+        assert DEFAULT_CONFIG["compression"]["codex_gpt55_autoraise"] is True
+
+    def test_adds_codex_native_compaction_default_false(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  threshold: 0.5\n"
+                "  codex_gpt55_autoraise: false\n",
+            )
+
+            result = migrate_config(interactive=False, quiet=True)
+
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert raw["compression"]["codex_gpt55_autoraise"] is False
+            assert raw["compression"]["codex_native_compaction"] is False
+            assert raw["compression"]["threshold"] == 0.5
+            assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+            assert (
+                "compression.codex_native_compaction=false"
+                in result["config_added"]
+            )
+
+    def test_nonquiet_migration_reports_new_opt_in_key(self, tmp_path, capsys):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  codex_gpt55_autoraise: true\n",
+            )
+
+            migrate_config(interactive=False, quiet=False)
+
+            out = capsys.readouterr().out
+            assert "Added compression.codex_native_compaction: false" in out
+            assert "set true to opt in to Codex-native compaction" in out
+
+    def test_preserves_existing_codex_native_compaction_value(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  codex_native_compaction: true\n",
+            )
+
+            result = migrate_config(interactive=False, quiet=True)
+
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert raw["compression"]["codex_native_compaction"] is True
+            assert (
+                "compression.codex_native_compaction=false"
+                not in result["config_added"]
+            )

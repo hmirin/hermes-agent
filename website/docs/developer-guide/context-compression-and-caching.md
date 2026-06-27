@@ -4,7 +4,8 @@ Hermes Agent uses a dual compression system and Anthropic prompt caching to
 manage context window usage efficiently across long conversations.
 
 Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (default engine),
-`agent/prompt_caching.py`, `gateway/run.py` (session hygiene), `run_agent.py` (search for `_compress_context`)
+`agent/conversation_compression.py` (compression dispatch), `agent/prompt_caching.py`,
+`gateway/run.py` (session hygiene), `run_agent.py` (search for `_compress_context`)
 
 
 ## Pluggable Context Engine
@@ -82,9 +83,10 @@ All compression settings are read from `config.yaml` under the `compression` key
 compression:
   enabled: true              # Enable/disable compression (default: true)
   threshold: 0.50            # Fraction of context window (default: 0.50 = 50%)
+  codex_responses_threshold: 0.85  # Codex OAuth / Responses API compaction trigger
   target_ratio: 0.20         # How much of threshold to keep as tail (default: 0.20)
   protect_last_n: 20         # Minimum protected tail messages (default: 20)
-  codex_gpt55_autoraise: true  # gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)
+  codex_app_server_auto: native  # native|hermes|off for Codex app-server auto-compaction
 
 # Summarization model/provider configured under auxiliary:
 auxiliary:
@@ -99,25 +101,42 @@ auxiliary:
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` |
+| `codex_responses_threshold` | `0.85` | 0.0-1.0 | Compression trigger for Codex OAuth / Responses API compaction. The recent tail still uses `protect_last_n` |
 | `target_ratio` | `0.20` | 0.10-0.80 | Controls tail protection token budget: `threshold_tokens × target_ratio` |
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
-| `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.5 on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
+| `codex_app_server_auto` | `native` | `native`, `hermes`, `off` | Auto-compaction mode for Codex app-server sessions |
 
-### Codex gpt-5.5 threshold autoraise
+### Codex Responses threshold
 
-The ChatGPT Codex OAuth backend hard-caps gpt-5.5 at a **272K** context window
-(the same slug exposes 1.05M on OpenAI's direct API and OpenRouter, and 400K on
-GitHub Copilot). At the default 50% trigger, compaction would fire at ~136K —
-half the window the model can actually use. When the active route is Codex
-OAuth (`provider: openai-codex`) and the model is gpt-5.5, Hermes raises the
-trigger to **85%** (~231K) and prints a one-time notice with the opt-out
-command. Only this exact route is affected; gpt-5.5 on any other provider keeps
-your global `threshold`. To opt back down to the global value:
+Codex OAuth (`provider: openai-codex`, `api_mode: codex_responses`) uses the
+Responses API's native opaque compaction state instead of Hermes' auxiliary
+summarizer. Its automatic compaction trigger is therefore configured separately
+with `compression.codex_responses_threshold` and defaults to **85%**. This keeps
+the general Hermes summarizer at the global `compression.threshold` while
+letting Codex's native compaction use more of the available context window.
 
-```bash
-hermes config set compression.codex_gpt55_autoraise false
-```
+### Codex-native compaction paths
+
+Codex-backed sessions do not use Hermes' auxiliary summarizer for the compacted
+portion of the conversation:
+
+- **Codex OAuth / Responses API** (`provider: openai-codex`,
+  `api_mode: codex_responses`): Hermes calls `responses.compact(...)` for the
+  older prefix of the transcript, stores the returned encrypted compaction item
+  on an assistant marker message, and keeps the recent tail unmodified. Future
+  requests replay that opaque compaction state through the Responses adapter.
+- **Codex app-server** (`api_mode: codex_app_server`): Codex owns the backing
+  thread context. Manual compaction asks the app-server to compact the thread
+  (`thread/compact/start`). For automatic compaction, the default
+  `codex_app_server_auto: native` lets the app-server decide when to compact and
+  Hermes records the resulting compaction events. Set `hermes` to let Hermes'
+  threshold initiate app-server compaction, or `off` to disable Hermes-initiated
+  automatic compaction.
+
+The global `protect_last_n` still controls how many recent local messages Hermes
+keeps outside Codex OAuth `responses.compact(...)`. It is not a separate Codex
+setting.
 
 ### Computed Values (for a 200K context model at defaults)
 

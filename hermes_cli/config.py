@@ -1289,8 +1289,10 @@ DEFAULT_CONFIG = {
     "compression": {
         "enabled": True,
         "threshold": 0.50,            # compress when context usage exceeds this ratio
+        "codex_responses_threshold": 0.85,  # Codex OAuth Responses API compaction trigger ratio
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
+        "codex_app_server_auto": "native",  # native|hermes|off for Codex app-server auto compaction
         "hygiene_hard_message_limit": 5000,  # gateway session-hygiene force-compress threshold by message count
         "protect_first_n": 3,         # non-system head messages always preserved
                                       # verbatim, in ADDITION to the system prompt
@@ -1309,16 +1311,6 @@ DEFAULT_CONFIG = {
                                       # Default False matches historical behavior; set to
                                       # True if you'd rather pause than silently lose
                                       # context turns when your aux model is flaky.
-        "codex_gpt55_autoraise": True,  # When True, gpt-5.5 on the ChatGPT Codex OAuth
-                                      # route raises its compaction trigger to 85% (vs the
-                                      # global `threshold` above). Codex hard-caps gpt-5.5
-                                      # at a 272K window, so the default 50% would compact
-                                      # at ~136K and waste half the usable context. Set to
-                                      # False to opt back down to the global threshold
-                                      # (e.g. 0.50) for Codex gpt-5.5 sessions. Only this
-                                      # exact route is affected — gpt-5.5 on OpenAI's
-                                      # direct API, OpenRouter, and Copilot keep the
-                                      # global threshold regardless.
         "in_place": True,             # When True, compaction rewrites the message
                                       # list and rebuilds the system prompt WITHOUT
                                       # rotating the session id — the conversation
@@ -2974,7 +2966,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 31,
+    "_config_version": 32,
 }
 
 # =============================================================================
@@ -5332,7 +5324,33 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false). "
                     "Set it to true to re-enable, or \"auto\" for the legacy "
                     "surface-aware behavior."
+                    )
+
+    # ── Version 31 → 32: remove Codex gpt-5.5-specific compaction knob ──
+    # Codex OAuth compaction now has a route-level trigger
+    # (compression.codex_responses_threshold). The temporary gpt-5.5-only
+    # autoraise flag is no longer read, so remove it from existing configs to
+    # avoid advertising a dead setting after update.
+    if current_ver < 32:
+        config = read_raw_config()
+        comp = config.get("compression")
+        if isinstance(comp, dict) and "codex_gpt55_autoraise" in comp:
+            old_autoraise = comp.pop("codex_gpt55_autoraise", None)
+            config["compression"] = comp
+            save_config(config)
+            results["config_added"].append(
+                "removed compression.codex_gpt55_autoraise"
+            )
+            if not quiet:
+                print(
+                    "  ✓ Removed unused compression.codex_gpt55_autoraise "
+                    "(use compression.codex_responses_threshold for Codex OAuth)"
                 )
+                if str(old_autoraise).strip().lower() in {"false", "0", "no"}:
+                    print(
+                        "    Set compression.codex_responses_threshold to change "
+                        "the new Codex OAuth trigger."
+                    )
 
     # ── Post-migration: disable exfiltration-shaped MCP stdio entries ──
     # Users can hand-edit mcp_servers, and older installs may already contain a
@@ -6915,6 +6933,7 @@ def show_config():
     print(f"  Enabled:      {'yes' if enabled else 'no'}")
     if enabled:
         print(f"  Threshold:    {compression.get('threshold', 0.50) * 100:.0f}%")
+        print(f"  Codex OAuth:  {compression.get('codex_responses_threshold', 0.85) * 100:.0f}%")
         print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
         print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
         print(f"  Protect first: {compression.get('protect_first_n', 3)} non-system head messages")

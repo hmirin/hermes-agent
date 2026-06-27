@@ -1345,3 +1345,64 @@ class TestVerifyOnStopMigration:
             migrate_config(interactive=False, quiet=True)
             raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
             assert raw["agent"]["verify_on_stop"] is True
+
+
+class TestCodexGpt55AutoraiseMigration:
+    """v31 -> v32: remove the obsolete Codex gpt-5.5-specific knob."""
+
+    def _write(self, tmp_path, body):
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+
+    def test_removes_legacy_codex_gpt55_autoraise_key(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  threshold: 0.5\n"
+                "  codex_gpt55_autoraise: false\n",
+            )
+
+            result = migrate_config(interactive=False, quiet=True)
+
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert "codex_gpt55_autoraise" not in raw["compression"]
+            assert raw["compression"]["threshold"] == 0.5
+            assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+            assert (
+                "removed compression.codex_gpt55_autoraise"
+                in result["config_added"]
+            )
+
+    def test_nonquiet_migration_reports_removed_key(self, tmp_path, capsys):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  codex_gpt55_autoraise: true\n",
+            )
+
+            migrate_config(interactive=False, quiet=False)
+
+            out = capsys.readouterr().out
+            assert "Removed unused compression.codex_gpt55_autoraise" in out
+            assert "compression.codex_responses_threshold" in out
+            assert "Set compression.codex_responses_threshold" not in out
+
+    def test_nonquiet_false_value_reports_new_threshold_hint(
+        self, tmp_path, capsys
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            self._write(
+                tmp_path,
+                "_config_version: 31\n"
+                "compression:\n"
+                "  codex_gpt55_autoraise: false\n",
+            )
+
+            migrate_config(interactive=False, quiet=False)
+
+            out = capsys.readouterr().out
+            assert "Removed unused compression.codex_gpt55_autoraise" in out
+            assert "Set compression.codex_responses_threshold" in out
